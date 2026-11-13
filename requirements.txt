@@ -1,0 +1,14 @@
+# Core: window messages + UI Automation
+uiautomation>=2.0.20
+comtypes>=1.2.0
+
+# Screenshots
+Pillow>=9.0.0
+
+# worker.py uses numpy for screenshot arrays
+numpy>=1.24.0
+
+# Optional -- only needed for screenshot OCR (ocr.py). It pulls onnxruntime
+# (~200 MB), so it is not installed by default. ocr.py imports it lazily and
+# raises a clear error if it is missing.
+# rapidocr_onnxruntime>=1.3.0

@@ -1,0 +1,19 @@
+# runtime state -- never commit
+_ipc/
+_log/
+_shots/
+_state/
+__pycache__/
+*.pyc
+*.pyo
+
+# machine-specific: which interpreter this machine uses
+_ops/python.txt
+
+# backups made by restore_from_md.py / reset
+*.bak-*
+*.bak
+
+# local scratch
+_local/
+*.log
