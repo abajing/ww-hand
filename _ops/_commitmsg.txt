@@ -1,0 +1,16 @@
+ww-hand: revert to MIT open source, drop the beta license gate
+
+The per-machine license check did not survive contact with reality: a
+buyer can copy the whole tree into a new archive and the machine-bound
+code travels with it. Gating it only annoys honest users.
+
+- remove the ww_license check from worker.py startup
+- delete _ops/ww_license.py, _ops/license.key.example, 授权.bat,
+  签发内测码.py and the .gitignore rule for license.key
+- manifest.py no longer skips license.key
+- README.md / README.zh-CN.md / 说明.txt: replace the beta section with
+  an MIT section (no key, no machine ID, no activation step)
+- BUILD -> fuse-2026-11-14c
+
+Verified: starts with no license.key on disk, /health reports
+build=fuse-2026-11-14c, 31/31 assertions green, manifest 26/26.

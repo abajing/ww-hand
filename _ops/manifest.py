@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 r"""生成 / 校验 清单.md5。
 
 以前这个清单是手工敲出来的，没有生成脚本，「日后核对有没有被改」这句
@@ -20,7 +20,7 @@ MANIFEST = os.path.join(ROOT, '清单.md5')
 
 SKIP_DIRS = {'.git', '_ipc', '_log', '_shots', '_state', '__pycache__',
              'incoming', '_local'}
-SKIP_FILES = {'清单.md5', 'license.key', 'python.txt'}
+SKIP_FILES = {'清单.md5', 'python.txt'}
 SKIP_SUFFIX = ('.pyc', '.pyo', '.log', '.bak')
 
 
@@ -52,7 +52,7 @@ def write():
     lines = [
         '# ww-hand 文件清单  %s' % time.strftime('%Y-%m-%d %H:%M:%S'),
         '# 只列入库文件；_ipc / _log / _shots / _state / __pycache__ / '
-        'python.txt / license.key 是运行时或机器相关，不纳入',
+        'python.txt 是运行时或机器相关，不纳入',
         '',
     ]
     for rel, md5, size in rows:

@@ -32,7 +32,7 @@ INSTANCE = os.environ.get('WW_INSTANCE', '')
 
 # 版本标记。换手（reset）之后靠它确认「跑的是新代码」，
 # 不用猜 —— 以前只能看 pid 变没变，pid 变了不代表加载了新文件。
-BUILD = 'fuse-2026-11-14b'
+BUILD = 'fuse-2026-11-14c'
 
 sys.path.insert(0, OPS)
 os.makedirs(IPC, exist_ok=True)
@@ -809,20 +809,6 @@ def main():
             return
     except Exception as e:
         log('单实例检查跳过 %r' % (e,))
-
-    # 内测授权：没有授权文件 / 码不对 / 过期，就不起 broker。
-    # 放在单实例检查之后，是为了让第二个实例先自己退出，不要抢着报授权错。
-    try:
-        import ww_license as _lic
-        _ok, _why = _lic.verify()
-    except Exception as _e:
-        # 授权模块本身出问题不该拖死整个 worker，但要留痕
-        _ok, _why = True, '授权模块不可用，跳过校验：%r' % (_e,)
-    if not _ok:
-        log('内测授权校验失败：%s' % _why)
-        log('把本机机器码发给作者换授权码，写进 _ops\\license.key 后重开。')
-        raise SystemExit(3)
-    log('内测授权 %s' % _why)
 
     log('=== worker 启动 pid=%s admin=%s ===' % (os.getpid(), bool(ctypes.windll.shell32.IsUserAnAdmin())))
     hb = os.path.join(IPC, 'worker.alive')
