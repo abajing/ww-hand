@@ -177,6 +177,22 @@ The full list is in `docs/SKILL.md`. The ones that cost the most:
   looks like an auth bug. Use `SO_EXCLUSIVEADDRUSE` for real exclusivity, and make the
   process exit when the bind fails instead of running on with a heartbeat and no listener.
 
+## Beta license
+
+This is a **closed beta** build. One license code, one machine. Without a valid code `worker.py` exits immediately (exit 3) and nothing listens on the port.
+
+```text
+1. Run 授权.bat (or python _ops\ww_license.py)  -> prints this machine's ID
+2. Send the ID to the author                     -> receive WWB-xxxxxxxxxxxx-xxxxxx-xxxxxxxx
+3. Edit _ops\license.key                         -> replace the last line with the code
+4. Restart the start .bat
+```
+
+- Format: `WWB-<first 12 of machine ID>-<expiry YYMMDD, 999999 = forever>-<8-char signature>`
+- The machine ID is derived from the registry `MachineGuid`: survives reboots and disk swaps, changes on OS reinstall or hardware move
+- `_ops/license.key` is machine specific and **not committed**; a fresh checkout only ships `_ops/license.key.example`
+- Verification is a local HMAC signature. It stops casual resharing, not someone who reads the source — the release build is meant to move this to a server check
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

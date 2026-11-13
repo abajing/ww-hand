@@ -17,3 +17,6 @@ _ops/python.txt
 # local scratch
 _local/
 *.log
+
+# per-machine license -- each buyer gets their own
+_ops/license.key
