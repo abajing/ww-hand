@@ -137,7 +137,8 @@ _ops/
   shot.py              窗口枚举 + 截图
   ocr.py               截图 OCR（可选依赖）
   stop.py              急停（全局热键）
-  uia_x.py             UI Automation：快照 / 定位 / 点击 / 读值 / 写值
+  uia_x.py             UI Automation 客户端：快照 / 定位 / 点击 / 读值 / 写值
+  uia_proc.py          UIA 子进程（单线程），独占所有 COM 对象
   textin.py            文本输入：WM_CHAR 投给编辑子控件 + SendInput Unicode
 _test/assert_lab.py    31 项端到端断言
 docs/SKILL.md          长文档：接口细节 + 23 条已经付过学费的坑
@@ -163,6 +164,12 @@ docs/SKILL.md          长文档：接口细节 + 23 条已经付过学费的坑
   而是悄悄分走第一个实例的请求。症状是：`/health` 活着，但带 token 的接口随机 403，
   看着像鉴权坏了。真正独占要用 `SO_EXCLUSIVEADDRUSE`；另外绑不上端口时进程必须退出，
   不能继续发心跳变成「活着但没在听」。
+- **UIA 客户端不能跨线程共用。** `uiautomation` 的 `_AutomationClient` 是进程级单例：
+  第一个碰它的线程创建 `IUIAutomation`，之后所有线程复用同一个指针。它默认走 STA，
+  而 STA 的接口指针有线程亲和性，换线程用就是访问已失效的代理 —— worker 直接
+  `0xC0000005` 崩在 `ControlFromHandle`。换 MTA 不管用；`UIAutomationInitializerInThread`
+  更糟，它的 `__del__` 会在 GC 碰巧执行的那个线程上调 `CoUninitialize`。现在所有 UIA
+  调用都在单线程子进程 `uia_proc.py` 里；它死了 worker 拿到 EOF，重拉一次重试，自己不死。
 
 ## 许可
 

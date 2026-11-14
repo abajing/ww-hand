@@ -148,7 +148,8 @@ _ops/
   shot.py              window enumeration + screenshots
   ocr.py               screenshot OCR (optional dependency)
   stop.py              kill switch (global hotkey)
-  uia_x.py             UI Automation: snapshot / locate / click / read / write
+  uia_x.py             UI Automation client: snapshot / locate / click / read / write
+  uia_proc.py          single-threaded UIA subprocess that owns every COM object
   textin.py            text input: WM_CHAR to edit child + SendInput Unicode
 _test/assert_lab.py    31 end-to-end assertions
 docs/SKILL.md          long-form notes: API details and 23 pitfalls already paid for
@@ -176,6 +177,16 @@ The full list is in `docs/SKILL.md`. The ones that cost the most:
   is a `/health` that answers while token-authenticated calls return random 403s, which
   looks like an auth bug. Use `SO_EXCLUSIVEADDRUSE` for real exclusivity, and make the
   process exit when the bind fails instead of running on with a heartbeat and no listener.
+- **UI Automation cannot be shared across threads.** `uiautomation`'s
+  `_AutomationClient` is a process-wide singleton: whichever thread touches it first
+  creates `IUIAutomation`, and every later thread reuses that pointer. It runs STA by
+  default, and STA interface pointers are thread-affine, so reusing one from another
+  thread is a use-after-free — the worker dies with `0xC0000005` in
+  `ControlFromHandle`. Switching to MTA does not help, and
+  `UIAutomationInitializerInThread` is worse still: its `__del__` calls
+  `CoUninitialize` from whichever thread the GC happens to run on. Every UIA call now
+  lives in a single-threaded subprocess (`uia_proc.py`); if it dies the worker gets EOF,
+  respawns it, retries once, and stays alive.
 
 ## License
 

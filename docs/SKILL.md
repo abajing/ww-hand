@@ -204,7 +204,8 @@ def call(path, payload=None, timeout=60):
   reset.py          提权清场换手
   shot.py           窗口枚举 + 截屏
   postinput.py      PostMessage 封装（lParam 必须带扫描码）
-  uia_x.py          控件级定位（UIA）：快照 / 找 / 点 / 写值
+  uia_x.py          控件级定位（UIA）客户端：快照 / 找 / 点 / 写值 → 转给 uia_proc
+  uia_proc.py       UIA 子进程（单线程）：独占所有 COM 对象，崩了自己重拉，不带走 worker
   textin.py         文本输入：WM_CHAR 投递 + SendInput Unicode
   tap.py            SendInput 封装（真输入，需前台）
   ocr.py            截图 OCR 读坐标
@@ -311,6 +312,19 @@ reset 干三件事，顺序不能变：
     真正独占要 `SO_EXCLUSIVEADDRUSE`（见 `worker.py` 的 `_ExclusiveServer`）。
     配套：绑不上端口时进程必须**退出**，不能继续发心跳 —— 否则得到一个「活着但没在听」的
     worker，既不响应请求，又占着单实例互斥体挡住真正能起来的那个。
+25. **UIA 客户端不能跨线程共用**，否则 worker 随机 `0xC0000005` 崩掉。
+    `uiautomation` 的 `_AutomationClient` 是**进程级单例**：第一个用它的线程创建
+    `IUIAutomation`，之后所有线程直接复用那个指针。而它默认走 STA，STA 的接口指针
+    有线程亲和性，换线程用不 marshal 就是解引用失效代理 → access violation，
+    崩在 `uiautomation.py:10461 ControlFromHandle`。实测：单线程连调 60 次不崩，
+    一挂到多线程 HTTP handler 上就崩。
+    - 换 MTA（`CoInitializeEx(None, 0)`）**不管用**，单例还是那个单例。
+    - `auto.UIAutomationInitializerInThread` 也**不能再用**：它的 `__exit__` 和
+      `__del__` 都调 `CoUninitialize`，而 `__del__` 由 GC 决定在**哪个线程**执行
+      （抓屏线程频繁分配最容易触发），等于把无辜线程的 apartment 拆了。
+    - 现在的做法：**UIA 全部搬进 `uia_proc.py` 单线程子进程**，worker 只发 JSON 行、
+      收 JSON 行；子进程死了 worker 拿到 EOF，重拉一次重试，worker 自己不死。
+      代价：快照存在子进程里，重拉后旧快照 id 失效（快照本来就有 TTL，可接受）。
 
 ## 屏幕监控那边（另一个东西，不冲突）
 
