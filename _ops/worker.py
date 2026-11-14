@@ -312,17 +312,11 @@ def _uia_actions(a, t):
     if t == 'probe':
         # 输入能力探测：这个窗口吃不吃哪种输入方式
         info = textin.can_accept_wm_char(hwnd)
-        probe = {}
-        with uia_x.auto.UIAutomationInitializerInThread():
-            root_hwnd, note = uia_x.locate_root(hwnd)
-            probe['root_hwnd'] = root_hwnd
-            probe['root_note'] = note
-            try:
-                root = uia_x.auto.ControlFromHandle(root_hwnd)
-                probe['uia_ok'] = root is not None
-            except Exception as e:
-                probe['uia_ok'] = False
-                probe['uia_err'] = repr(e)
+        # UIA 探测走子进程（uia_x.probe 内部转发），本进程不碰 COM 指针
+        probe = uia_x.probe(hwnd) or {}
+        probe.pop('ok', None)
+        for k in ('root_hwnd', 'root_note', 'uia_ok', 'uia_err'):
+            probe.setdefault(k, None)
         snap = uia_x.snapshot(hwnd, maxd=8)
         probe['nodes_d8'] = snap.get('count') if snap.get('ok') else None
         uia_x.drop(snap.get('id') if snap.get('ok') else None)

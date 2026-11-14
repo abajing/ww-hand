@@ -60,6 +60,9 @@ worker 是 ThreadingHTTPServer，每请求新线程。UIA 走 COM，
 """
 import ctypes
 import ctypes.wintypes as wt
+import json
+import os
+import sys
 import threading
 import time
 import uuid
@@ -129,6 +132,82 @@ _CB = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
 _snaps = {}
 _snap_lock = threading.Lock()
 _MAX_SNAPS = 16
+
+
+# ---------------------------------------------------------------- COM 作用域
+#
+# 为什么不再用 auto.UIAutomationInitializerInThread()
+# ------------------------------------------------
+# 它的 __exit__ 和 __del__ 都会调 UninitializeUIAutomationInCurrentThread()
+# 也就是 CoUninitialize()。问题是 __del__ 由 GC 决定在**哪个线程**执行，
+# 而 Python 的 GC 可以在任意线程触发。于是出现这条链：
+#
+#   抓屏线程（PIL/GDI）频繁分配 -> 触发 GC -> 在抓屏线程上回收了某个
+#   UIAutomationInitializerInThread 实例 -> 该线程被 CoUninitialize
+#   （faulthandler 实测：comtypes/_post_coinit/unknwn.py:33 _shutdown 抛
+#    RPC_E_DISCONNECTED 0x80010108）
+#   -> 之后任何 ElementFromHandle 都踩到已失效的 COM 指针
+#   -> access violation 崩在 uiautomation.py ControlFromHandle
+#   -> 整个 worker 进程死（exit 0xC0000005）
+#
+# 所以「只调用 locate、不抓屏」永远不会崩，「进程里同时有抓屏」就必崩。
+#
+# 现在的做法
+# ----------------
+# 1) 每个线程只 Initialize 一次，记在 threading.local，**永不 Uninitialize** ——
+#    线程结束时 Windows 自己回收 apartment，代价是每线程几十字节。
+# 2) UIA 调用全局串行。UI Automation 客户端在并发下本身就不稳，而 worker
+#    一次只跑一批动作，串行不损失吞吐。
+# 3) 可重入（RLock + 每线程深度计数），允许 act_live 里嵌套调用。
+_UIA_LOCK = threading.RLock()
+_uia_local = threading.local()
+_ole32 = ctypes.windll.ole32
+
+
+class _UIAScope(object):
+    """替代 UIAutomationInitializerInThread 的安全版本。"""
+
+    __slots__ = ()
+
+    def __enter__(self):
+        _UIA_LOCK.acquire()
+        depth = getattr(_uia_local, 'depth', 0)
+        if depth == 0:
+            # 必须用 MTA，不能用 uiautomation 默认的 STA。
+            # 原因：uiautomation 的 _AutomationClient 是进程级单例，第一个线程
+            # 拿到的 IUIAutomation 接口指针会被后面所有线程直接复用。STA 的
+            # 接口指针有线程亲和性，跨线程用必须 marshal —— 不 marshal 就是
+            # 解引用已失效的代理，access violation 崩在 ElementFromHandle
+            # （实测崩在 uiautomation.py:10461 ControlFromHandle）。
+            # MTA 下接口指针可以自由跨线程，这是 UIA 客户端该用的模式。
+            # COINIT_MULTITHREADED = 0x0；RPC_E_CHANGED_MODE 说明本线程
+            # 已被初始化成别的模式，忽略即可（此时沿用已有 apartment）。
+            try:
+                _ole32.CoInitializeEx(None, 0)
+            except Exception:
+                pass
+            init = getattr(auto, 'InitializeUIAutomationInCurrentThread', None)
+            if init is not None:
+                try:
+                    init()
+                except Exception:
+                    pass
+        _uia_local.depth = depth + 1
+        return self
+
+    def __exit__(self, *exc):
+        _uia_local.depth = max(0, getattr(_uia_local, 'depth', 1) - 1)
+        _UIA_LOCK.release()
+        return False
+
+
+def _uia_scope():
+    return _UIAScope()
+
+
+def uia_scope():
+    """给别的模块（worker.py）复用的公开入口。"""
+    return _UIAScope()
 
 
 # ---------------------------------------------------------------- 窗口工具
@@ -221,7 +300,7 @@ def locate(hwnd, name=None, role=None, aid=None, cls=None, index=0,
     """
     if hwnd is None:
         return {'ok': False, 'err': 'no_hwnd', 'msg': '必须给窗口句柄'}
-    with auto.UIAutomationInitializerInThread():
+    with _uia_scope():
         root_hwnd, note = locate_root(int(hwnd))
         try:
             root = auto.ControlFromHandle(root_hwnd)
@@ -446,7 +525,7 @@ def act_live(hwnd, op='invoke', name=None, role=None, aid=None, cls=None,
                 break
             time.sleep(0.12)
             continue
-        with auto.UIAutomationInitializerInThread():
+        with _uia_scope():
             r = _do(hit['ctrl'], op, text=text, hwnd=hwnd)
         r['target'] = hit['info']
         r['attempt'] = attempt + 1
@@ -470,7 +549,7 @@ def snapshot(hwnd, maxd=DEFAULT_DEPTH, only_interactive=True,
     返回 {'ok','id','hwnd','root_hwnd','note','count','elapsed_ms','items'}
     items 每项 {ref,type,name,aid,rect,pats,d,vis}
     """
-    with auto.UIAutomationInitializerInThread():
+    with _uia_scope():
         t0 = time.time()
         root_hwnd, note = locate_root(int(hwnd))
         try:
@@ -626,7 +705,7 @@ def act(sid, ref, op='invoke', text=None, hwnd=None):
         if ctrl is None:
             return {'ok': False, 'err': 'bad_ref', 'msg': '快照里没有 %s' % ref}
         tgt = hwnd or snap['hwnd']
-    with auto.UIAutomationInitializerInThread():
+    with _uia_scope():
         try:
             return _do(ctrl, op, text=text, hwnd=tgt)
         except Exception as e:
@@ -659,7 +738,7 @@ def stats():
 
 def active_doc_url(hwnd):
     """读浏览器窗口当前 URL（DocumentControl 的 Value）。"""
-    with auto.UIAutomationInitializerInThread():
+    with _uia_scope():
         root_hwnd, _ = locate_root(int(hwnd))
         try:
             root = auto.ControlFromHandle(root_hwnd)
@@ -696,3 +775,203 @@ def vk_of(name):
     if s.isdigit():
         return int(s)
     raise ValueError('不认识的键: %s' % name)
+
+
+# ---------------------------------------------------------------- 子进程执行
+#
+# 为什么不在这儿直接调 UIA
+# ------------------------
+# uiautomation 的 _AutomationClient 是进程级单例：第一个线程创建 IUIAutomation，
+# 指针挂在类属性上，后面所有线程复用同一个。comtypes 走 STA，STA 的接口指针
+# 有线程亲和性，换线程直接用就是解引用失效代理 —— access violation 崩在
+# ElementFromHandle。实测：单线程连调 60 次不崩；HTTP 每请求新线程只调 locate
+# 60 次不崩；走 worker.do_action 第 2 次必崩（exit 0xC0000005）。换 MTA 也不行，
+# 因为单例指针照样被跨 apartment 复用。
+#
+# 所以整个 UIA 调用搬到 uia_proc.py 子进程（单线程），worker 只发请求收结果。
+# 子进程崩了，worker 收到 EOF，重拉 + 重试一次，worker 本身不死。
+_INPROC = os.environ.get('WW_UIA_INPROC') == '1'
+_uia_proc = None
+
+
+class _ProcDead(Exception):
+    pass
+
+
+class _ProcTimeout(Exception):
+    pass
+
+
+class _UiaProc(object):
+    """一条常驻子进程 + JSON 行协议。"""
+
+    def __init__(self, timeout=20.0):
+        self.timeout = timeout
+        self.lock = threading.Lock()
+        self.seq = 0
+        self.proc = None
+        self.q = None
+        self.spawns = 0
+        self.calls = 0
+        self.failures = 0
+
+    def _script(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'uia_proc.py')
+
+    def _spawn(self):
+        import subprocess
+        import queue
+        py = sys.executable or 'python.exe'
+        base = os.path.basename(py).lower()
+        if base.startswith('pythonw'):
+            cand = os.path.join(os.path.dirname(py), base.replace('pythonw',
+                                                                 'python'))
+            if os.path.exists(cand):
+                py = cand
+        flags = 0x08000000 if os.name == 'nt' else 0   # CREATE_NO_WINDOW
+        self.proc = subprocess.Popen(
+            [py, '-u', self._script()],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            creationflags=flags)
+        self.q = queue.Queue()
+        q = self.q
+
+        def _reader():
+            try:
+                for line in self.proc.stdout:
+                    q.put(line)
+            except Exception:
+                pass
+            q.put(None)
+
+        threading.Thread(target=_reader, daemon=True,
+                         name='uia_proc_reader').start()
+        self.spawns += 1
+
+    def _kill(self):
+        p, self.proc = self.proc, None
+        self.q = None
+        if p is None:
+            return
+        try:
+            p.kill()
+        except Exception:
+            pass
+        try:
+            p.wait(timeout=2)
+        except Exception:
+            pass
+
+    def _call_once(self, fn, args, kwargs):
+        import queue
+        if self.proc is None or self.proc.poll() is not None:
+            self._kill()
+            self._spawn()
+        self.seq += 1
+        rid = self.seq
+        line = json.dumps({'id': rid, 'fn': fn, 'args': list(args),
+                           'kwargs': kwargs}, ensure_ascii=False,
+                          default=str)
+        try:
+            self.proc.stdin.write((line + '\n').encode('utf-8'))
+            self.proc.stdin.flush()
+        except Exception as e:
+            raise _ProcDead(repr(e))
+        deadline = time.time() + self.timeout
+        while True:
+            remain = deadline - time.time()
+            if remain <= 0:
+                raise _ProcTimeout('%.1fs' % self.timeout)
+            try:
+                raw = self.q.get(timeout=remain)
+            except queue.Empty:
+                raise _ProcTimeout('%.1fs' % self.timeout)
+            if raw is None:
+                raise _ProcDead('EOF')
+            try:
+                rep = json.loads(raw.decode('utf-8', 'replace'))
+            except Exception:
+                continue
+            if rep.get('id') != rid:
+                continue          # 迟到的旧响应，丢掉
+            return rep.get('r')
+
+    def call(self, fn, *args, **kwargs):
+        with self.lock:
+            self.calls += 1
+            last = None
+            for attempt in (0, 1):
+                try:
+                    return self._call_once(fn, args, kwargs)
+                except (_ProcDead, _ProcTimeout) as e:
+                    last = e
+                    self.failures += 1
+                    self._kill()
+                    if attempt == 0:
+                        time.sleep(0.15)
+            return {'ok': False, 'err': 'uia_proc_down', 'msg': repr(last),
+                    'spawns': self.spawns}
+
+    def stats(self):
+        return {'spawns': self.spawns, 'calls': self.calls,
+                'failures': self.failures,
+                'pid': (self.proc.pid if self.proc else None)}
+
+
+def _get_proc():
+    global _uia_proc
+    if _uia_proc is None:
+        _uia_proc = _UiaProc()
+    return _uia_proc
+
+
+def probe(hwnd):
+    """输入能力探测用：根句柄 + UIA 能不能拿到。返回纯 dict。"""
+    import uiautomation as _a
+    with _uia_scope():
+        root_hwnd, note = locate_root(hwnd)
+        ok = False
+        err = None
+        try:
+            ok = _a.ControlFromHandle(root_hwnd) is not None
+        except Exception as e:
+            err = repr(e)
+    return {'ok': True, 'root_hwnd': root_hwnd, 'root_note': note,
+            'uia_ok': ok, 'uia_err': err}
+
+
+_FORWARD = ('act_live', 'snapshot', 'find', 'act', 'drop',
+            'active_doc_url', 'probe', 'locate', 'matches')
+
+
+def _bind_forwarders():
+    """本进程里这些入口一律转发到子进程；子进程内部（WW_UIA_INPROC=1）不转发。"""
+    def make(name):
+        def fwd(*a, **k):
+            return _get_proc().call(name, *a, **k)
+        fwd.__name__ = name
+        return fwd
+
+    for name in _FORWARD:
+        if name in globals():
+            globals()[name] = make(name)
+
+    # stats 要合并本进程的转发统计
+    local_stats = stats
+
+    def _stats_merged():
+        d = _get_proc().stats()
+        try:
+            d['snaps'] = local_stats().get('snaps')
+        except Exception:
+            pass
+        return d
+
+    globals()['stats'] = _stats_merged
+
+
+if not _INPROC:
+    _bind_forwarders()
