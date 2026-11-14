@@ -53,6 +53,21 @@ def say(msg):
         pass
 
 
+def _known_ports():
+    """本实例该被认领的端口。
+
+    reset 是「本实例」的换手工具，只该动本实例的进程。认端口是为了防一个真踩过的坑：
+    老 fuse1 进程环境里没有 WW_PORT，会退回 8792 去撞生产，然后被生产的守护拉回来。
+    哪些端口算「我」的：配过 WW_PORT 就是它；没配就只有一个 —— 本实例 broker.token
+    那个端口（token 文件里不存端口，所以退一步用 8794 这个第二实例的固定值）。
+    """
+    p = os.environ.get('WW_PORT')
+    out = set()
+    if p and p.isdigit():
+        out.add(int(p))
+    return out
+
+
 def main():
     import procfind
     kill_only = '--kill' in sys.argv
@@ -63,12 +78,18 @@ def main():
     # 会把生产那套一起杀掉。完整路径互不包含，天然区分。
     guard_self = os.path.join(OPS, 'worker_guard.py')
     worker_self = os.path.join(OPS, 'worker.py')
+    # 端口来自 WW_PORT，但**不能只信环境变量**：
+    #   旧的 pythonw 进程环境里根本没有 WW_PORT（环境变量不落盘，重启就没了），
+    #   于是老的 fuse1 实例会退回默认 8792，撞上生产的 worker 就退出，
+    #   而生产的守护又会好心把「端口写错的那个」拉回来 —— 谁都起不来。
+    # 这里给一个兜底清单，按「谁的进程树里有这个进程」认领端口。
+    ports = _known_ports()
     targets = []
-    for pid, pp, c in procfind.find([guard_self], exclude=('reset.py',)):
+    for pid, pp, c in procfind.find([guard_self], exclude=('reset.py',), ports=ports):
         targets.append(pid)
     for pid, pp, c in procfind.find([worker_self],
                                     exclude=('worker_guard', 'channel',
-                                             'reset.py')):
+                                             'reset.py'), ports=ports):
         targets.append(pid)
 
     # 把 launcher 外壳也带上（它们的命令行同样含 worker.py）

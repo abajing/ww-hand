@@ -90,7 +90,15 @@ def list_windows(visible_only=True, with_rect=True, min_w=60, min_h=40):
 def resolve_window(a):
     """把动作里的目标描述解析成一个窗口。
 
-    不传任何目标就落到鸣潮（保持老行为）。
+    不传任何目标就落到当前前台窗口（2026-11-14 改）。
+
+    为什么不再「默认落到鸣潮」：那是老行为，在"手"变成通用工具之后变成了隐患 ——
+    调用方漏写目标时，动作会落到一个**跟它毫无关系**的窗口上。
+    实测（2026-11-14 16:5x）：一条不带 hwnd 的 `ptext` 打进了前台在跑的
+    英雄联盟/QQ 那一层，而不是报错。
+    现在默认取前景窗口，而且 `strict` 的调用方（ptext、uia 写入类 op）会直接报错，
+    要求显式指定目标，见 _uia_actions 与 do_action 的 ptext 分支。
+
     但「手」本身是通用的：任何窗口都能操作，不要求游戏开着。
 
     认这些字段（优先级从上到下）：
@@ -212,11 +220,17 @@ def focus(hwnd=None, target=None):
 
 
 def _tgt_hwnd(a, fallback_fg=True):
-    """给 UIA 类动作定目标窗口。
+    """给动作定目标窗口。
 
-    和 resolve_window 的区别：那个默认落到鸣潮（cls 含 Unreal），
-    对 UIA 不合适 —— 控件级定位主要用于浏览器/客户端，
-    没指定窗口时用「当前前台窗口」更符合直觉。
+    有目标字段就按字段解析（hwnd / title / cls / at / fg）。
+    什么都没有时：
+
+      · 读值类（fallback_fg=True）落到前台窗口，读错了没有副作用；
+      · **写值类（fallback_fg=False）一律报错**，不猜。
+
+    为什么写值类不许猜：2026-11-14 实测过一条不带目标的 `ptext`
+    悄悄打进了前台那个跟调用方毫无关系的窗口。UIA 写值、按键、点击
+    都是这个道理 —— 目标不明就报错，让调用方把 hwnd 说清楚。
     """
     if a.get('hwnd'):
         return int(a['hwnd']), None
@@ -229,10 +243,12 @@ def _tgt_hwnd(a, fallback_fg=True):
         h = u.GetForegroundWindow()
         if h:
             return int(h), None
-    g = resolve_window(a)
-    if not g:
-        return None, win_hint()
-    return int(g['hwnd']), None
+        g = resolve_window(a)
+        if not g:
+            return None, win_hint()
+        return int(g['hwnd']), None
+    return None, ('没指定目标窗口。写操作（文本/点按）必须显式给 hwnd / title / '
+                  'cls / at / fg 之一，不猜前台 —— 猜错就是往无关窗口里打字。')
 
 
 def _uia_actions(a, t):
@@ -243,9 +259,17 @@ def _uia_actions(a, t):
     """
     import uia_x, textin
 
-    hwnd, err = _tgt_hwnd(a)
+    # 写类动作（会落输入 / 会激活控件）必须显式指定目标；
+    # 读类（取值、抓快照、找控件、读 URL）允许落到前台窗口。
+    _WRITE_T = ('ptext', 'stext')
+    _WRITE_OP = ('set', 'invoke', 'click', 'focus', 'select', 'toggle')
+    strict = (t in _WRITE_T or
+              (t == 'uia' and a.get('op', 'invoke') in _WRITE_OP) or
+              (t == 'uia_act' and a.get('op', 'invoke') in _WRITE_OP))
+
+    hwnd, err = _tgt_hwnd(a, fallback_fg=not strict)
     if err:
-        return {'ok': False, 'err': err}
+        return {'ok': False, 'err': 'no_target', 'msg': err}
 
     if t == 'uia':
         # 一步到位：现场定位 + 执行。最常用的一条。
